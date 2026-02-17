@@ -5,7 +5,7 @@ import {
 } from "recharts";
 
 // ── Data ──────────────────────────────────────────────────────────────
-const FIRMS = [
+const DEFAULT_FIRMS = [
   { id: 1, name: "Meridian Partners", region: "Southeast", employees: 85, revenue: 12.4, advisory_pct: 18, tax_pct: 62, audit_pct: 20, growth_rate: 8.2, cross_sell_score: 34, pipeline_value: 2.1, nps: 72, retention: 91, icp_alignment: 67, readiness: 58 },
   { id: 2, name: "Apex Advisory Group", region: "Northeast", employees: 120, revenue: 18.7, advisory_pct: 31, tax_pct: 48, audit_pct: 21, growth_rate: 14.5, cross_sell_score: 71, pipeline_value: 4.8, nps: 81, retention: 94, icp_alignment: 82, readiness: 79 },
   { id: 3, name: "Summit CPAs", region: "Midwest", employees: 45, revenue: 6.2, advisory_pct: 12, tax_pct: 71, audit_pct: 17, growth_rate: 3.1, cross_sell_score: 22, pipeline_value: 0.8, nps: 68, retention: 87, icp_alignment: 54, readiness: 41 },
@@ -58,6 +58,238 @@ const ICP_CRITERIA = [
   { criterion: "3+ service line need", weight: 15 },
   { criterion: "Growth trajectory >10%", weight: 10 },
   { criterion: "Industry alignment", weight: 10 },
+];
+
+// ── RPP Constants ─────────────────────────────────────────────────────
+const RPP_BENCHMARK = 193;
+const RPP_TOP_QUARTILE = 245;
+const RPP_PE_TARGET = 275;
+
+// ── Computed Data Functions (recompute when firms change) ─────────────
+function computeRPP(firms) {
+  return firms.map(f => {
+    const currentRPP = Math.round((f.revenue * 1000) / f.employees);
+    const advisoryLift = Math.round(currentRPP * (1 + (35 - f.advisory_pct) * 0.008));
+    const efficiencyLift = Math.round(advisoryLift * 1.06);
+    return { ...f, currentRPP, advisoryLift, fullPotential: efficiencyLift };
+  });
+}
+
+function computeCAS(firms) {
+  return firms.map(f => {
+    const base = f.advisory_pct * 1.8 + f.cross_sell_score * 0.4 + f.readiness * 0.3;
+    const techScore = Math.min(100, base + (f.growth_rate > 10 ? 15 : 0));
+    const teamScore = f.advisory_pct >= 25 ? 75 : f.advisory_pct >= 15 ? 45 : 20;
+    const pricingScore = f.advisory_pct >= 20 ? 60 : 30;
+    const trainingScore = f.cross_sell_score * 0.9;
+    const segScore = f.icp_alignment * 0.7;
+    const kpiScore = f.readiness * 0.8;
+    const onboardScore = f.retention > 90 ? 70 : 45;
+    const aiScore = f.growth_rate > 10 ? 55 : 25;
+    const overall = Math.round(
+      techScore * 0.15 + teamScore * 0.20 + pricingScore * 0.15 +
+      trainingScore * 0.15 + segScore * 0.10 + kpiScore * 0.10 +
+      onboardScore * 0.10 + aiScore * 0.05
+    );
+    return {
+      ...f, overall, scores: {
+        tech_stack: Math.round(techScore), cas_team: Math.round(teamScore),
+        pricing_model: Math.round(pricingScore), advisory_training: Math.round(trainingScore),
+        client_segmentation: Math.round(segScore), kpi_dashboards: Math.round(kpiScore),
+        onboarding: Math.round(onboardScore), ai_tools: Math.round(aiScore),
+      }
+    };
+  });
+}
+
+// ── Smart CSV Parser ──────────────────────────────────────────────────
+const COLUMN_ALIASES = {
+  name: ["name", "firm", "firm name", "firm_name", "company", "company name", "organization"],
+  region: ["region", "location", "area", "geography", "office", "market"],
+  employees: ["employees", "staff", "headcount", "head count", "team size", "fte", "ftes", "people", "professionals", "pros"],
+  revenue: ["revenue", "rev", "total revenue", "annual revenue", "revenue ($m)", "revenue (millions)", "rev ($m)", "gross revenue"],
+  advisory_pct: ["advisory", "advisory %", "advisory_pct", "advisory pct", "advisory percent", "advisory revenue", "advisory mix", "cas %", "cas", "cas_pct"],
+  tax_pct: ["tax", "tax %", "tax_pct", "tax pct", "tax percent", "tax revenue", "tax compliance"],
+  audit_pct: ["audit", "audit %", "audit_pct", "audit pct", "audit percent", "audit revenue", "assurance", "audit & assurance"],
+  growth_rate: ["growth", "growth rate", "growth_rate", "growth %", "yoy growth", "annual growth", "organic growth"],
+  cross_sell_score: ["cross sell", "cross-sell", "cross_sell", "cross sell score", "cross_sell_score", "xsell", "x-sell"],
+  pipeline_value: ["pipeline", "pipeline value", "pipeline_value", "pipeline ($m)", "deal pipeline"],
+  nps: ["nps", "net promoter", "net promoter score", "satisfaction"],
+  retention: ["retention", "client retention", "retention rate", "retention %"],
+  icp_alignment: ["icp", "icp alignment", "icp_alignment", "ideal client", "client fit", "icp score"],
+  readiness: ["readiness", "growth readiness", "readiness score", "maturity"],
+};
+
+function matchColumn(header) {
+  const h = header.toLowerCase().trim().replace(/[_\-]/g, " ").replace(/[%$()]/g, "").trim();
+  for (const [field, aliases] of Object.entries(COLUMN_ALIASES)) {
+    if (aliases.some(a => a === h || h.includes(a) || a.includes(h))) return field;
+  }
+  return null;
+}
+
+function smartParse(num, field) {
+  if (typeof num === "string") num = num.replace(/[$,%\s]/g, "").trim();
+  const val = parseFloat(num);
+  if (isNaN(val)) return null;
+  // Auto-detect if revenue is in thousands vs millions
+  if (field === "revenue" && val > 500) return Math.round(val / 100) / 10; // e.g. 12400 → 12.4
+  // Auto-detect if percentages are 0-1 vs 0-100
+  if (field.includes("pct") && val > 0 && val <= 1) return Math.round(val * 100);
+  if (field === "growth_rate" && val > 0 && val <= 1) return Math.round(val * 1000) / 10;
+  return val;
+}
+
+function inferMissing(firm, allFirms) {
+  // Smart defaults based on what data IS provided
+  const avgOf = (key) => {
+    const vals = allFirms.filter(f => f[key] != null && f[key] > 0).map(f => f[key]);
+    return vals.length ? Math.round(vals.reduce((a, b) => a + b, 0) / vals.length) : null;
+  };
+  const defaults = {
+    region: "Unspecified",
+    employees: avgOf("employees") || 65,
+    revenue: avgOf("revenue") || 9.0,
+    advisory_pct: avgOf("advisory_pct") || 20,
+    tax_pct: firm.advisory_pct ? Math.max(10, 80 - (firm.advisory_pct || 20) - (firm.audit_pct || 20)) : avgOf("tax_pct") || 58,
+    audit_pct: avgOf("audit_pct") || 20,
+    growth_rate: avgOf("growth_rate") || 7.0,
+    cross_sell_score: firm.advisory_pct ? Math.min(90, Math.round(firm.advisory_pct * 2.2)) : avgOf("cross_sell_score") || 40,
+    pipeline_value: firm.revenue ? Math.round(firm.revenue * 0.18 * 10) / 10 : avgOf("pipeline_value") || 2.0,
+    nps: avgOf("nps") || 73,
+    retention: avgOf("retention") || 90,
+    icp_alignment: avgOf("icp_alignment") || 65,
+    readiness: null, // computed below
+  };
+  for (const [key, def] of Object.entries(defaults)) {
+    if (firm[key] == null || firm[key] === "" || firm[key] === 0) {
+      if (key !== "readiness") firm[key] = def;
+    }
+  }
+  // Compute readiness from available signals
+  if (firm.readiness == null || firm.readiness === 0) {
+    firm.readiness = Math.round(
+      (firm.advisory_pct / 35) * 25 +
+      (firm.cross_sell_score / 100) * 25 +
+      (firm.growth_rate / 15) * 25 +
+      (firm.retention / 100) * 25
+    );
+  }
+  return firm;
+}
+
+function parseCSV(text) {
+  const lines = text.split(/\r?\n/).filter(l => l.trim());
+  if (lines.length < 2) return { firms: null, errors: ["File must have a header row and at least one data row."] };
+
+  // Parse header — handle quoted values
+  const parseRow = (line) => {
+    const result = [];
+    let current = "", inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (ch === '"') { inQuotes = !inQuotes; continue; }
+      if (ch === "," && !inQuotes) { result.push(current.trim()); current = ""; continue; }
+      if (ch === "\t" && !inQuotes) { result.push(current.trim()); current = ""; continue; }
+      current += ch;
+    }
+    result.push(current.trim());
+    return result;
+  };
+
+  const headers = parseRow(lines[0]);
+  const columnMap = {};
+  const unmapped = [];
+  headers.forEach((h, i) => {
+    const field = matchColumn(h);
+    if (field) columnMap[i] = field;
+    else if (h.trim()) unmapped.push(h.trim());
+  });
+
+  if (!columnMap || Object.values(columnMap).indexOf("name") === -1) {
+    return { firms: null, errors: ["Could not find a 'Firm Name' column. Please include a column with firm/company names."] };
+  }
+
+  const warnings = [];
+  if (unmapped.length) warnings.push(`Skipped unrecognized columns: ${unmapped.join(", ")}`);
+
+  const parsed = [];
+  for (let r = 1; r < lines.length; r++) {
+    const row = parseRow(lines[r]);
+    if (row.every(c => !c.trim())) continue; // skip blank rows
+    const firm = { id: r };
+    for (const [colIdx, field] of Object.entries(columnMap)) {
+      const raw = row[colIdx];
+      if (field === "name" || field === "region") {
+        firm[field] = raw || "";
+      } else {
+        const val = smartParse(raw, field);
+        if (val !== null) firm[field] = val;
+      }
+    }
+    if (firm.name) parsed.push(firm);
+  }
+
+  if (!parsed.length) return { firms: null, errors: ["No valid data rows found. Check that your file has firm data below the header row."] };
+
+  // Infer missing fields
+  const complete = parsed.map(f => inferMissing(f, parsed));
+
+  const mapped = Object.values(columnMap);
+  const provided = [...new Set(mapped)].filter(f => f !== "name" && f !== "region");
+  const optional = Object.keys(COLUMN_ALIASES).filter(f => f !== "name" && !mapped.includes(f));
+  if (optional.length > 3) {
+    warnings.push(`Auto-estimated ${optional.length} fields from your data. For best results, also include: ${optional.slice(0, 4).join(", ")}`);
+  }
+
+  return { firms: complete, errors: [], warnings, provided: provided.length, total: Object.keys(COLUMN_ALIASES).length - 1 };
+}
+
+function generateTemplate() {
+  const headers = "Firm Name,Region,Employees,Revenue ($M),Advisory %,Tax %,Audit %,Growth Rate %,Cross-Sell Score,Pipeline ($M),NPS,Retention %,ICP Alignment,Growth Readiness";
+  const example1 = "Smith & Associates,Northeast,85,12.4,18,62,20,8.2,34,2.1,72,91,67,58";
+  const example2 = "Apex Advisory,West,120,18.7,31,48,21,14.5,71,4.8,81,94,82,79";
+  const example3 = "Regional CPAs,Midwest,45,6.2,12,71,17,3.1,22,0.8,68,87,54,41";
+  return [headers, example1, example2, example3].join("\n");
+}
+
+const CAS_MATURITY = [
+  { stage: "Stage 1", label: "Compliance-Only", range: "0-25", color: "#ef4444", desc: "No CAS infrastructure. Pure tax/audit shop." },
+  { stage: "Stage 2", label: "CAS-Curious", range: "26-45", color: "#f97316", desc: "Some bookkeeping/payroll. No dedicated team or pricing model." },
+  { stage: "Stage 3", label: "CAS-Emerging", range: "46-60", color: "#eab308", desc: "Dedicated team forming. Moving to fixed pricing. Early advisory conversations." },
+  { stage: "Stage 4", label: "CAS-Established", range: "61-75", color: "#22c55e", desc: "Full CAS practice with subscription model. Advisory driving growth." },
+  { stage: "Stage 5", label: "CAS-Leader", range: "76-100", color: "#06b6d4", desc: "AI-powered CAS with client KPI dashboards. Advisory is primary revenue driver." },
+];
+
+// ── TCJA Data ─────────────────────────────────────────────────────────
+const TCJA_TIMELINE = [
+  { quarter: "Q1 '26", planning_demand: 35, compliance_base: 100, planning_revenue: 1.8, label: "Awareness builds" },
+  { quarter: "Q2 '26", planning_demand: 58, compliance_base: 98, planning_revenue: 3.2, label: "Proactive outreach" },
+  { quarter: "Q3 '26", planning_demand: 82, compliance_base: 95, planning_revenue: 5.1, label: "Peak planning season" },
+  { quarter: "Q4 '26", planning_demand: 95, compliance_base: 92, planning_revenue: 6.8, label: "Pre-sunset rush" },
+  { quarter: "Q1 '27", planning_demand: 72, compliance_base: 88, planning_revenue: 4.9, label: "New code adjustment" },
+  { quarter: "Q2 '27", planning_demand: 55, compliance_base: 85, planning_revenue: 3.6, label: "Ongoing advisory" },
+];
+
+const TCJA_PROVISIONS = [
+  { provision: "Individual rate reductions", impact: "HIGH", clients_affected: "85%", action: "Tax projection + Roth conversion analysis", revenue_per: "$2,500-$5,000" },
+  { provision: "QBI deduction (Sec. 199A)", impact: "HIGH", clients_affected: "62%", action: "Entity structure review + planning", revenue_per: "$3,000-$8,000" },
+  { provision: "SALT cap ($10K)", impact: "HIGH", clients_affected: "48%", action: "State tax strategy + entity election", revenue_per: "$1,500-$4,000" },
+  { provision: "Estate exemption ($13.6M→~$7M)", impact: "CRITICAL", clients_affected: "18%", action: "Trust restructuring + gifting strategy", revenue_per: "$8,000-$25,000" },
+  { provision: "Child tax credit changes", impact: "MEDIUM", clients_affected: "41%", action: "Withholding adjustment + planning", revenue_per: "$500-$1,500" },
+  { provision: "AMT exemption reduction", impact: "MEDIUM", clients_affected: "22%", action: "AMT exposure analysis", revenue_per: "$1,000-$3,000" },
+];
+
+// ── CAS Readiness Criteria ────────────────────────────────────────────
+const CAS_CRITERIA = [
+  { id: "tech_stack", label: "Cloud Accounting Stack", description: "QBO/Xero + integrated apps", weight: 15 },
+  { id: "cas_team", label: "Dedicated CAS Team", description: "Separate from compliance staff", weight: 20 },
+  { id: "pricing_model", label: "Subscription/Fixed Pricing", description: "Moved beyond hourly billing", weight: 15 },
+  { id: "advisory_training", label: "Advisory Skills Training", description: "Partners trained in consultative selling", weight: 15 },
+  { id: "client_segmentation", label: "Client Segmentation", description: "Tiered service model by client value", weight: 10 },
+  { id: "kpi_dashboards", label: "Client KPI Dashboards", description: "Proactive reporting for clients", weight: 10 },
+  { id: "onboarding", label: "Structured Onboarding", description: "Repeatable CAS client intake process", weight: 10 },
+  { id: "ai_tools", label: "AI/Automation Integration", description: "AI for analysis, insights, forecasting", weight: 5 },
 ];
 
 // ── Utility ───────────────────────────────────────────────────────────
@@ -378,86 +610,74 @@ function GrowthProjection({ firms }) {
   );
 }
 
-function PipelineView() {
-  return (
-    <div>
-      <div className="grid-4" style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginBottom: 24 }}>
-        {[
-          { label: "Total Leads", value: PIPELINE_DATA.reduce((s, d) => s + d.leads, 0), color: "#6366f1" },
-          { label: "Qualified", value: PIPELINE_DATA.reduce((s, d) => s + d.qualified, 0), color: "#D9AA4B" },
-          { label: "Proposals", value: PIPELINE_DATA.reduce((s, d) => s + d.proposals, 0), color: "#06b6d4" },
-          { label: "Closed Won", value: PIPELINE_DATA.reduce((s, d) => s + d.closed, 0), color: "#22c55e" },
-        ].map((m, i) => (
-          <div key={i} style={{ background: `${m.color}08`, border: `1px solid ${m.color}20`, borderRadius: 10, padding: "14px 16px", animation: `fadeIn 0.4s ease ${i * 0.1}s both` }}>
-            <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: "rgba(255,255,255,0.35)", letterSpacing: 1 }}>{m.label.toUpperCase()}</div>
-            <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: 24, fontWeight: 700, color: m.color }}>{m.value}</div>
-          </div>
-        ))}
-      </div>
-      <ResponsiveContainer width="100%" height={260}>
-        <ComposedChart data={PIPELINE_DATA} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
-          <XAxis dataKey="month" tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 10, fontFamily: "'JetBrains Mono', monospace" }} axisLine={{ stroke: "rgba(255,255,255,0.06)" }} />
-          <YAxis yAxisId="left" tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 10, fontFamily: "'JetBrains Mono', monospace" }} axisLine={{ stroke: "rgba(255,255,255,0.06)" }} />
-          <YAxis yAxisId="right" orientation="right" tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 10, fontFamily: "'JetBrains Mono', monospace" }} axisLine={{ stroke: "rgba(255,255,255,0.06)" }} tickFormatter={v => `$${v}M`} />
-          <Tooltip contentStyle={{ background: "#1a1a1a", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, fontFamily: "'DM Sans', sans-serif", fontSize: 12 }} />
-          <Bar yAxisId="left" dataKey="leads" fill="rgba(99,102,241,0.5)" radius={[3, 3, 0, 0]} name="Leads" />
-          <Bar yAxisId="left" dataKey="qualified" fill="rgba(217,170,75,0.6)" radius={[3, 3, 0, 0]} name="Qualified" />
-          <Bar yAxisId="left" dataKey="closed" fill="rgba(34,197,94,0.6)" radius={[3, 3, 0, 0]} name="Closed" />
-          <Line yAxisId="right" type="monotone" dataKey="value" stroke="#D9AA4B" strokeWidth={2.5} dot={{ fill: "#D9AA4B", r: 3 }} name="Deal Value ($M)" />
-        </ComposedChart>
-      </ResponsiveContainer>
-    </div>
-  );
-}
-
-function ServiceOpportunity() {
-  const chartData = SERVICE_LINES.map(s => ({
-    name: s.name.length > 14 ? s.name.substring(0, 14) + "…" : s.name,
-    fullName: s.name, current: s.current, gap: s.potential - s.current, margin: s.margin,
-  })).sort((a, b) => b.gap - a.gap);
-
-  return (
-    <div>
-      <div style={{ display: "flex", alignItems: "center", gap: 16, marginBottom: 16 }}>
-        {[{ label: "Current Penetration", color: "rgba(99,102,241,0.6)" }, { label: "Untapped Potential", color: "rgba(217,170,75,0.5)" }].map(l => (
-          <div key={l.label} style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            <div style={{ width: 12, height: 8, borderRadius: 2, background: l.color }} />
-            <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: "rgba(255,255,255,0.4)", letterSpacing: 0.5 }}>{l.label}</span>
-          </div>
-        ))}
-      </div>
-      <ResponsiveContainer width="100%" height={300}>
-        <BarChart data={chartData} layout="vertical" margin={{ top: 0, right: 20, left: 10, bottom: 0 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" horizontal={false} />
-          <XAxis type="number" tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 10, fontFamily: "'JetBrains Mono', monospace" }} axisLine={{ stroke: "rgba(255,255,255,0.06)" }} tickFormatter={v => `${v}%`} />
-          <YAxis dataKey="name" type="category" width={110} tick={{ fill: "rgba(255,255,255,0.5)", fontSize: 11, fontFamily: "'DM Sans', sans-serif" }} axisLine={{ stroke: "rgba(255,255,255,0.06)" }} />
-          <Tooltip contentStyle={{ background: "#1a1a1a", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, fontFamily: "'DM Sans', sans-serif", fontSize: 12 }} />
-          <Bar dataKey="current" stackId="a" fill="rgba(99,102,241,0.6)" name="Current %" />
-          <Bar dataKey="gap" stackId="a" fill="rgba(217,170,75,0.5)" radius={[0, 4, 4, 0]} name="Growth Potential %" />
-        </BarChart>
-      </ResponsiveContainer>
-    </div>
-  );
-}
-
-
 // ── Main App ──────────────────────────────────────────────────────────
 export default function App() {
   const [activeTab, setActiveTab] = useState("overview");
   const [selectedFirm, setSelectedFirm] = useState(null);
+  const [firms, setFirms] = useState(DEFAULT_FIRMS);
+  const [isCustomData, setIsCustomData] = useState(false);
+  const [uploadState, setUploadState] = useState({ status: "idle", message: "", warnings: [], stats: null });
+  const [showUploadPanel, setShowUploadPanel] = useState(false);
 
-  const totalRev = FIRMS.reduce((s, f) => s + f.revenue, 0);
-  const totalPipeline = FIRMS.reduce((s, f) => s + f.pipeline_value, 0);
-  const avgReadiness = FIRMS.reduce((s, f) => s + f.readiness, 0) / FIRMS.length;
-  const avgCrossSell = FIRMS.reduce((s, f) => s + f.cross_sell_score, 0) / FIRMS.length;
+  // Derived data — recomputes when firms change
+  const RPP_PROJECTION = computeRPP(firms);
+  const CAS_FIRM_SCORES = computeCAS(firms);
+
+  const totalRev = firms.reduce((s, f) => s + f.revenue, 0);
+  const totalPipeline = firms.reduce((s, f) => s + f.pipeline_value, 0);
+  const avgReadiness = firms.reduce((s, f) => s + f.readiness, 0) / firms.length;
+  const avgCrossSell = firms.reduce((s, f) => s + f.cross_sell_score, 0) / firms.length;
+
+  const handleFileUpload = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploadState({ status: "processing", message: "Analyzing your data...", warnings: [], stats: null });
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const result = parseCSV(ev.target.result);
+        if (result.errors?.length) {
+          setUploadState({ status: "error", message: result.errors[0], warnings: [], stats: null });
+          return;
+        }
+        setFirms(result.firms);
+        setIsCustomData(true);
+        setUploadState({
+          status: "success",
+          message: `Loaded ${result.firms.length} firms successfully`,
+          warnings: result.warnings || [],
+          stats: { firms: result.firms.length, provided: result.provided, total: result.total },
+        });
+        setTimeout(() => setShowUploadPanel(false), 2500);
+      } catch (err) {
+        setUploadState({ status: "error", message: "Could not parse file. Please check the format and try again.", warnings: [], stats: null });
+      }
+    };
+    reader.readAsText(file);
+  };
+
+  const handleTemplateDownload = () => {
+    const csv = generateTemplate();
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = "growth-command-center-template.csv"; a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleResetData = () => {
+    setFirms(DEFAULT_FIRMS);
+    setIsCustomData(false);
+    setUploadState({ status: "idle", message: "", warnings: [], stats: null });
+  };
 
   const tabs = [
     { id: "overview", label: "Platform Overview" },
     { id: "firms", label: "Firm Intelligence" },
     { id: "crosssell", label: "Cross-Sell Matrix" },
-    { id: "pipeline", label: "Pipeline Health" },
-    { id: "services", label: "Service Expansion" },
+    { id: "tcja", label: "TCJA Sunset" },
+    { id: "cas", label: "CAS Readiness" },
+    { id: "rpp", label: "Revenue/Professional" },
     { id: "icp", label: "ICP Scorer" },
     { id: "projection", label: "Growth Model" },
   ];
@@ -479,13 +699,26 @@ export default function App() {
                 Multi-Firm Growth <span style={{ color: "#D9AA4B" }}>Command Center</span>
               </h1>
               <p style={{ fontSize: 14, color: "rgba(255,255,255,0.4)", margin: 0, maxWidth: 560, lineHeight: 1.5 }}>
-                Centralized organic growth operations for a PE-backed CPA & advisory platform. Coordinating strategy across {FIRMS.length} member firms.
+                Centralized organic growth operations for a PE-backed CPA & advisory platform. Coordinating strategy across {firms.length} member firms.
               </p>
             </div>
             <div className="header-right" style={{ textAlign: "right", animation: "fadeIn 0.6s ease 0.2s both" }}>
               <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: "rgba(255,255,255,0.25)", letterSpacing: 1.5, marginBottom: 4 }}>DESIGNED BY</div>
               <div style={{ fontSize: 15, fontWeight: 600, color: "rgba(255,255,255,0.7)" }}>Binil Chacko</div>
               <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: "rgba(217,170,75,0.6)", marginTop: 2, letterSpacing: 0.5 }}>CGO Strategic Prototype</div>
+              <button
+                onClick={() => setShowUploadPanel(!showUploadPanel)}
+                style={{
+                  marginTop: 10, fontFamily: "'JetBrains Mono', monospace", fontSize: 10,
+                  color: isCustomData ? "#22c55e" : "#D9AA4B",
+                  background: isCustomData ? "rgba(34,197,94,0.1)" : "rgba(217,170,75,0.08)",
+                  border: `1px solid ${isCustomData ? "rgba(34,197,94,0.25)" : "rgba(217,170,75,0.2)"}`,
+                  borderRadius: 6, padding: "6px 12px", cursor: "pointer", letterSpacing: 0.5,
+                  transition: "all 0.2s ease",
+                }}
+              >
+                {isCustomData ? `✓ YOUR DATA (${firms.length} FIRMS)` : "↑ UPLOAD YOUR FIRM DATA"}
+              </button>
             </div>
           </div>
 
@@ -514,13 +747,164 @@ export default function App() {
         </div>
       </div>
 
+      {/* ── Upload Panel ── */}
+      {showUploadPanel && (
+        <div style={{ maxWidth: 1200, margin: "0 auto", padding: "0 32px" }}>
+          <div style={{
+            background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.08)",
+            borderRadius: 14, padding: 28, marginBottom: 4, animation: "fadeIn 0.3s ease",
+          }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 20 }}>
+              <div>
+                <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: "#D9AA4B", letterSpacing: 1.5, marginBottom: 6 }}>TEST WITH YOUR OWN FIRM DATA</div>
+                <p style={{ fontFamily: "'DM Sans', sans-serif", fontSize: 14, color: "rgba(255,255,255,0.6)", lineHeight: 1.6, margin: 0, maxWidth: 600 }}>
+                  Upload a CSV or TSV with your member firm data. The system will auto-detect your columns, estimate any missing fields, and recompute every score and projection across the entire command center.
+                </p>
+              </div>
+              <button onClick={() => setShowUploadPanel(false)} style={{ background: "none", border: "none", color: "rgba(255,255,255,0.3)", fontSize: 20, cursor: "pointer", padding: "0 4px" }}>×</button>
+            </div>
+
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20, marginBottom: 20 }}>
+              {/* Upload Zone */}
+              <label style={{
+                display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+                border: "2px dashed rgba(217,170,75,0.2)", borderRadius: 12, padding: "28px 20px",
+                cursor: "pointer", transition: "all 0.2s ease", minHeight: 120,
+                background: uploadState.status === "success" ? "rgba(34,197,94,0.04)" : "rgba(217,170,75,0.02)",
+              }}>
+                <input type="file" accept=".csv,.tsv,.txt" onChange={handleFileUpload} style={{ display: "none" }} />
+                {uploadState.status === "idle" && (
+                  <>
+                    <div style={{ fontSize: 28, marginBottom: 8, opacity: 0.4 }}>📄</div>
+                    <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: 14, fontWeight: 500, color: "rgba(255,255,255,0.5)" }}>Drop CSV here or click to browse</div>
+                    <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: "rgba(255,255,255,0.25)", marginTop: 4 }}>.csv, .tsv, or .txt</div>
+                  </>
+                )}
+                {uploadState.status === "processing" && (
+                  <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: 14, color: "#D9AA4B" }}>Analyzing your data...</div>
+                )}
+                {uploadState.status === "success" && (
+                  <>
+                    <div style={{ fontSize: 28, marginBottom: 8 }}>✅</div>
+                    <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: 14, fontWeight: 500, color: "#22c55e" }}>{uploadState.message}</div>
+                    <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: "rgba(255,255,255,0.35)", marginTop: 4 }}>
+                      {uploadState.stats?.provided} of {uploadState.stats?.total} data fields detected · rest auto-estimated
+                    </div>
+                  </>
+                )}
+                {uploadState.status === "error" && (
+                  <>
+                    <div style={{ fontSize: 28, marginBottom: 8 }}>⚠️</div>
+                    <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: 13, color: "#ef4444", textAlign: "center", lineHeight: 1.5 }}>{uploadState.message}</div>
+                    <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: 12, color: "rgba(255,255,255,0.3)", marginTop: 6 }}>Click to try again</div>
+                  </>
+                )}
+              </label>
+
+              {/* Instructions */}
+              <div>
+                <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: "rgba(255,255,255,0.35)", letterSpacing: 1, marginBottom: 10 }}>WHAT TO INCLUDE</div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+                  {[
+                    { field: "Firm Name", req: true, note: "Required" },
+                    { field: "Employees / Headcount", req: false, note: "Auto-estimated if missing" },
+                    { field: "Revenue ($M)", req: false, note: "Auto-estimated if missing" },
+                    { field: "Advisory %", req: false, note: "Key metric — include if possible" },
+                    { field: "Tax %", req: false, note: "Auto-balanced from advisory" },
+                    { field: "Growth Rate %", req: false, note: "Auto-estimated if missing" },
+                    { field: "Region / Location", req: false, note: "Optional grouping" },
+                    { field: "Cross-Sell Score", req: false, note: "Auto-estimated from advisory" },
+                  ].map((f, i) => (
+                    <div key={i} style={{ display: "flex", alignItems: "center", gap: 6, padding: "4px 0" }}>
+                      <div style={{
+                        width: 6, height: 6, borderRadius: "50%",
+                        background: f.req ? "#D9AA4B" : "rgba(255,255,255,0.15)",
+                      }} />
+                      <div>
+                        <span style={{ fontFamily: "'DM Sans', sans-serif", fontSize: 12, color: "rgba(255,255,255,0.6)" }}>{f.field}</span>
+                        <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 9, color: "rgba(255,255,255,0.25)", marginLeft: 6 }}>{f.note}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <div style={{ display: "flex", gap: 10, marginTop: 14 }}>
+                  <button onClick={handleTemplateDownload} style={{
+                    fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: "#D9AA4B",
+                    background: "rgba(217,170,75,0.08)", border: "1px solid rgba(217,170,75,0.2)",
+                    borderRadius: 6, padding: "8px 14px", cursor: "pointer", letterSpacing: 0.5,
+                  }}>
+                    ↓ DOWNLOAD CSV TEMPLATE
+                  </button>
+                  {isCustomData && (
+                    <button onClick={handleResetData} style={{
+                      fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: "rgba(255,255,255,0.4)",
+                      background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)",
+                      borderRadius: 6, padding: "8px 14px", cursor: "pointer", letterSpacing: 0.5,
+                    }}>
+                      RESET TO DEMO DATA
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Warnings */}
+            {uploadState.warnings?.length > 0 && (
+              <div style={{ marginTop: 4 }}>
+                {uploadState.warnings.map((w, i) => (
+                  <div key={i} style={{
+                    fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: "rgba(234,179,8,0.7)",
+                    background: "rgba(234,179,8,0.05)", border: "1px solid rgba(234,179,8,0.1)",
+                    borderRadius: 6, padding: "8px 12px", marginTop: 6,
+                  }}>
+                    ⚠ {w}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 9, color: "rgba(255,255,255,0.15)", marginTop: 14, lineHeight: 1.5 }}>
+              Your data stays in your browser — nothing is uploaded to any server. The smart parser handles messy headers, mixed formats, percentages as decimals or whole numbers, and revenue in thousands or millions. Just give it what you have.
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Custom Data Banner */}
+      {isCustomData && !showUploadPanel && (
+        <div style={{ maxWidth: 1200, margin: "0 auto", padding: "0 32px" }}>
+          <div style={{
+            background: "rgba(34,197,94,0.04)", border: "1px solid rgba(34,197,94,0.12)",
+            borderRadius: 8, padding: "8px 16px", display: "flex", justifyContent: "space-between", alignItems: "center",
+          }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <div style={{ width: 6, height: 6, borderRadius: "50%", background: "#22c55e" }} />
+              <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: "#22c55e", letterSpacing: 0.5 }}>
+                SHOWING YOUR DATA · {firms.length} FIRMS LOADED
+              </span>
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button onClick={() => setShowUploadPanel(true)} style={{
+                fontFamily: "'JetBrains Mono', monospace", fontSize: 9, color: "rgba(255,255,255,0.4)",
+                background: "none", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 4,
+                padding: "4px 10px", cursor: "pointer",
+              }}>CHANGE</button>
+              <button onClick={handleResetData} style={{
+                fontFamily: "'JetBrains Mono', monospace", fontSize: 9, color: "rgba(255,255,255,0.3)",
+                background: "none", border: "none", padding: "4px 8px", cursor: "pointer",
+              }}>RESET</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ── Content ── */}
       <div className="content-pad" style={{ maxWidth: 1200, margin: "0 auto", padding: "28px 32px 48px" }}>
 
         {activeTab === "overview" && (
           <div>
             <div className="grid-4" style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 16, marginBottom: 36 }}>
-              <MetricCard label="Platform Revenue" value={`$${totalRev.toFixed(1)}M`} sub={`${FIRMS.length} member firms`} delay={0} accent />
+              <MetricCard label="Platform Revenue" value={`$${totalRev.toFixed(1)}M`} sub={`${firms.length} member firms`} delay={0} accent />
               <MetricCard label="Active Pipeline" value={`$${totalPipeline.toFixed(1)}M`} sub="Across all firms" delay={0.1} />
               <MetricCard label="Avg Growth Readiness" value={`${avgReadiness.toFixed(0)}`} sub={`${getScoreLabel(avgReadiness)} — needs CGO lift`} delay={0.2} />
               <MetricCard label="Cross-Sell Index" value={`${avgCrossSell.toFixed(0)}`} sub="Significant upside available" delay={0.3} />
@@ -530,10 +914,10 @@ export default function App() {
             <div className="grid-3" style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16, marginBottom: 36 }}>
               {[
                 { num: "01", title: "Advisory Mix Imbalance", color: "#ef4444",
-                  desc: `Average advisory revenue is just ${(FIRMS.reduce((s, f) => s + f.advisory_pct, 0) / FIRMS.length).toFixed(0)}% across firms. Industry leaders are at 35%+. Every 5pt shift = ~$${(totalRev * 0.05 * 0.15).toFixed(1)}M in higher-margin revenue.`,
+                  desc: `Average advisory revenue is just ${(firms.reduce((s, f) => s + f.advisory_pct, 0) / firms.length).toFixed(0)}% across firms. Industry leaders are at 35%+. Every 5pt shift = ~$${(totalRev * 0.05 * 0.15).toFixed(1)}M in higher-margin revenue.`,
                   action: "Build cross-sell playbooks + firm-level advisory activation plans" },
                 { num: "02", title: "Fragmented Growth Execution", color: "#eab308",
-                  desc: `${FIRMS.filter(f => f.readiness < 50).length} of ${FIRMS.length} firms score below 50 on growth readiness. No centralized lead gen, inconsistent CRM adoption, and zero coordinated go-to-market.`,
+                  desc: `${firms.filter(f => f.readiness < 50).length} of ${firms.length} firms score below 50 on growth readiness. No centralized lead gen, inconsistent CRM adoption, and zero coordinated go-to-market.`,
                   action: "Implement centralized growth stack with firm-specific playbooks" },
                 { num: "03", title: "Pipeline Conversion Leakage", color: "#6366f1",
                   desc: `Lead-to-close conversion running at ${((PIPELINE_DATA.reduce((s, d) => s + d.closed, 0) / PIPELINE_DATA.reduce((s, d) => s + d.leads, 0)) * 100).toFixed(1)}%. Best-in-class platforms convert at 22-28%. Tightening this alone adds $${(totalPipeline * 0.12).toFixed(1)}M annually.`,
@@ -594,7 +978,7 @@ export default function App() {
           <div>
             <SectionHeader title="Firm Growth Intelligence" subtitle="Click any firm to explore detailed metrics. Growth readiness scores composite: pipeline health, advisory mix, cross-sell activity, and partner engagement." />
             <div className="grid-2" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
-              {FIRMS.sort((a, b) => b.readiness - a.readiness).map((f, i) => (
+              {[...firms].sort((a, b) => b.readiness - a.readiness).map((f, i) => (
                 <FirmCard key={f.id} firm={f} index={i} onClick={setSelectedFirm} selected={selectedFirm?.id === f.id} />
               ))}
             </div>
@@ -666,30 +1050,6 @@ export default function App() {
           </div>
         )}
 
-        {activeTab === "pipeline" && (
-          <div>
-            <SectionHeader title="Platform Pipeline Health" subtitle="Aggregate funnel performance across all member firms." />
-            <div style={{ background: "rgba(255,255,255,0.015)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 14, padding: 28 }}>
-              <PipelineView />
-            </div>
-          </div>
-        )}
-
-        {activeTab === "services" && (
-          <div>
-            <SectionHeader title="Service Line Expansion Opportunity" subtitle="Current penetration vs addressable potential. Largest gaps represent highest-ROI growth targets." />
-            <div style={{ background: "rgba(255,255,255,0.015)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 14, padding: 28 }}>
-              <ServiceOpportunity />
-            </div>
-            <div style={{ marginTop: 24, background: "rgba(217,170,75,0.04)", border: "1px solid rgba(217,170,75,0.12)", borderRadius: 12, padding: 24 }}>
-              <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: "#D9AA4B", letterSpacing: 1.5, marginBottom: 8 }}>STRATEGIC INSIGHT</div>
-              <p style={{ fontFamily: "'DM Sans', sans-serif", fontSize: 14, color: "rgba(255,255,255,0.65)", lineHeight: 1.7, margin: 0 }}>
-                The largest growth opportunity sits in <strong style={{ color: "#fff" }}>CFO Advisory</strong> (60pt gap) and <strong style={{ color: "#fff" }}>Technology Consulting</strong> (74pt gap) — both are high-margin services (70%+) that naturally cross-sell from existing tax and audit relationships. A CGO should prioritize building go-to-market playbooks for these two service lines first, using the strongest firms as pilot programs before rolling out platform-wide.
-              </p>
-            </div>
-          </div>
-        )}
-
         {activeTab === "icp" && (
           <div>
             <SectionHeader title="Ideal Client Profile Scorer" subtitle="Interactive tool for firm partners to qualify prospects against the platform's ideal client criteria." />
@@ -728,7 +1088,7 @@ export default function App() {
           <div>
             <SectionHeader title="Growth Impact Model" subtitle="Projected revenue trajectory with CGO-led organic growth initiatives vs. baseline organic growth." />
             <div style={{ background: "rgba(255,255,255,0.015)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 14, padding: 28 }}>
-              <GrowthProjection firms={FIRMS} />
+              <GrowthProjection firms={firms} />
             </div>
             <div style={{ marginTop: 24, background: "rgba(217,170,75,0.04)", border: "1px solid rgba(217,170,75,0.12)", borderRadius: 12, padding: 24 }}>
               <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: "#D9AA4B", letterSpacing: 1.5, marginBottom: 8 }}>MODEL ASSUMPTIONS</div>
@@ -741,6 +1101,280 @@ export default function App() {
                   <div key={i}>
                     <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: 12, color: "rgba(255,255,255,0.45)", marginBottom: 2 }}>{a.label}</div>
                     <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: 13, fontWeight: 500, color: "rgba(255,255,255,0.7)" }}>{a.value}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* RPP TAB */}
+        {activeTab === "rpp" && (
+          <div>
+            <SectionHeader title="Revenue Per Professional" subtitle="The metric PE investors obsess over. Industry average is $193K. Top quartile is $245K. PE-backed platforms target $275K+ through advisory mix shift and operational efficiency." />
+            <div className="grid-3" style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16, marginBottom: 28 }}>
+              <div style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 12, padding: 20, textAlign: "center" }}>
+                <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: "rgba(255,255,255,0.35)", letterSpacing: 1 }}>PLATFORM AVG RPP</div>
+                <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: 32, fontWeight: 700, color: getScoreColor(Math.round((totalRev * 1000) / firms.reduce((s, f) => s + f.employees, 0)) > RPP_BENCHMARK ? 70 : 40) }}>
+                  ${Math.round((totalRev * 1000) / firms.reduce((s, f) => s + f.employees, 0))}K
+                </div>
+                <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: 11, color: "rgba(255,255,255,0.4)" }}>vs ${RPP_BENCHMARK}K industry avg</div>
+              </div>
+              <div style={{ background: "rgba(217,170,75,0.06)", border: "1px solid rgba(217,170,75,0.15)", borderRadius: 12, padding: 20, textAlign: "center" }}>
+                <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: "rgba(255,255,255,0.35)", letterSpacing: 1 }}>WITH ADVISORY SHIFT</div>
+                <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: 32, fontWeight: 700, color: "#D9AA4B" }}>
+                  ${Math.round(RPP_PROJECTION.reduce((s, f) => s + f.advisoryLift, 0) / firms.length)}K
+                </div>
+                <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: 11, color: "rgba(255,255,255,0.4)" }}>projected with 35% advisory mix</div>
+              </div>
+              <div style={{ background: "rgba(34,197,94,0.06)", border: "1px solid rgba(34,197,94,0.15)", borderRadius: 12, padding: 20, textAlign: "center" }}>
+                <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: "rgba(255,255,255,0.35)", letterSpacing: 1 }}>PE TARGET</div>
+                <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: 32, fontWeight: 700, color: "#22c55e" }}>${RPP_PE_TARGET}K</div>
+                <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: 11, color: "rgba(255,255,255,0.4)" }}>top-quartile PE platform benchmark</div>
+              </div>
+            </div>
+
+            <div style={{ background: "rgba(255,255,255,0.015)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 14, padding: 28, marginBottom: 24 }}>
+              <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: "rgba(255,255,255,0.35)", letterSpacing: 1.5, marginBottom: 16 }}>RPP BY FIRM — CURRENT vs POTENTIAL</div>
+              <ResponsiveContainer width="100%" height={320}>
+                <BarChart data={RPP_PROJECTION.sort((a, b) => b.currentRPP - a.currentRPP)} layout="vertical" margin={{ top: 0, right: 20, left: 10, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" horizontal={false} />
+                  <XAxis type="number" tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 10, fontFamily: "'JetBrains Mono', monospace" }} axisLine={{ stroke: "rgba(255,255,255,0.06)" }} tickFormatter={v => `$${v}K`} domain={[0, 300]} />
+                  <YAxis dataKey="name" type="category" width={120} tick={{ fill: "rgba(255,255,255,0.5)", fontSize: 11, fontFamily: "'DM Sans', sans-serif" }} axisLine={{ stroke: "rgba(255,255,255,0.06)" }} />
+                  <Tooltip contentStyle={{ background: "#1a1a1a", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, fontFamily: "'DM Sans', sans-serif", fontSize: 12 }} formatter={v => [`$${v}K`]} />
+                  <Bar dataKey="currentRPP" fill="rgba(99,102,241,0.6)" radius={[0, 0, 0, 0]} name="Current RPP" />
+                  <Bar dataKey="fullPotential" fill="rgba(34,197,94,0.5)" radius={[0, 4, 4, 0]} name="Potential RPP" />
+                  {/* Reference lines rendered as bars would be complex, using tooltip instead */}
+                </BarChart>
+              </ResponsiveContainer>
+              <div style={{ display: "flex", gap: 24, marginTop: 12, flexWrap: "wrap" }}>
+                {[
+                  { label: "Current RPP", color: "rgba(99,102,241,0.6)" },
+                  { label: "Potential RPP (advisory + efficiency)", color: "rgba(34,197,94,0.5)" },
+                  { label: `Industry Avg: $${RPP_BENCHMARK}K`, color: "transparent", border: true },
+                ].map((l, i) => (
+                  <div key={i} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <div style={{ width: 14, height: 8, borderRadius: 2, background: l.color, border: l.border ? "1px dashed rgba(255,255,255,0.3)" : "none" }} />
+                    <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: "rgba(255,255,255,0.4)" }}>{l.label}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div style={{ background: "rgba(217,170,75,0.04)", border: "1px solid rgba(217,170,75,0.12)", borderRadius: 12, padding: 24 }}>
+              <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: "#D9AA4B", letterSpacing: 1.5, marginBottom: 8 }}>WHY PE INVESTORS TRACK RPP</div>
+              <p style={{ fontFamily: "'DM Sans', sans-serif", fontSize: 14, color: "rgba(255,255,255,0.65)", lineHeight: 1.7, margin: 0 }}>
+                Revenue Per Professional is the single metric that tells PE investors whether a platform is <strong style={{ color: "#fff" }}>growing smart or just growing big</strong>. Hiring more bodies to serve more clients is linear. Shifting advisory mix from 20% to 35% while holding headcount increases RPP by 25-40% — that's leverage. The CGO's job is to drive RPP upward through advisory activation, cross-sell, and operational efficiency — not by adding headcount. That's how you create enterprise value that multiplies at exit.
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* TCJA TAB */}
+        {activeTab === "tcja" && (
+          <div>
+            <SectionHeader title="TCJA Sunset Opportunity Window" subtitle="The Tax Cuts and Jobs Act provisions expire Dec 31, 2025. This creates the largest advisory revenue opportunity in a decade for CPA platforms — if they act now." />
+            
+            <div className="grid-4" style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 16, marginBottom: 28 }}>
+              {[
+                { label: "Provisions Expiring", value: "23+", sub: "Major tax code changes", color: "#ef4444" },
+                { label: "Platform Clients Affected", value: "~85%", sub: "Across all member firms", color: "#D9AA4B" },
+                { label: "Planning Revenue Opp.", value: "$6.8M", sub: "Peak quarter projection", color: "#22c55e" },
+                { label: "Window Remaining", value: "NOW", sub: "Planning must start immediately", color: "#06b6d4" },
+              ].map((m, i) => (
+                <div key={i} style={{
+                  background: `${m.color}08`, border: `1px solid ${m.color}20`, borderRadius: 12, padding: "18px 20px",
+                  animation: `fadeIn 0.4s ease ${i * 0.1}s both`,
+                }}>
+                  <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: "rgba(255,255,255,0.35)", letterSpacing: 1 }}>{m.label.toUpperCase()}</div>
+                  <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: 28, fontWeight: 700, color: m.color }}>{m.value}</div>
+                  <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: 11, color: "rgba(255,255,255,0.4)" }}>{m.sub}</div>
+                </div>
+              ))}
+            </div>
+
+            <div style={{ background: "rgba(255,255,255,0.015)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 14, padding: 28, marginBottom: 24 }}>
+              <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: "rgba(255,255,255,0.35)", letterSpacing: 1.5, marginBottom: 16 }}>PLANNING DEMAND vs COMPLIANCE BASE — QUARTERLY PROJECTION</div>
+              <ResponsiveContainer width="100%" height={280}>
+                <ComposedChart data={TCJA_TIMELINE} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+                  <defs>
+                    <linearGradient id="planGrad" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="#D9AA4B" stopOpacity={0.3} />
+                      <stop offset="95%" stopColor="#D9AA4B" stopOpacity={0} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
+                  <XAxis dataKey="quarter" tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 10, fontFamily: "'JetBrains Mono', monospace" }} axisLine={{ stroke: "rgba(255,255,255,0.06)" }} />
+                  <YAxis yAxisId="left" tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 10, fontFamily: "'JetBrains Mono', monospace" }} axisLine={{ stroke: "rgba(255,255,255,0.06)" }} label={{ value: "Index", angle: -90, position: "insideLeft", style: { fill: "rgba(255,255,255,0.2)", fontSize: 10 } }} />
+                  <YAxis yAxisId="right" orientation="right" tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 10, fontFamily: "'JetBrains Mono', monospace" }} axisLine={{ stroke: "rgba(255,255,255,0.06)" }} tickFormatter={v => `$${v}M`} />
+                  <Tooltip contentStyle={{ background: "#1a1a1a", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, fontFamily: "'DM Sans', sans-serif", fontSize: 12 }} />
+                  <Area yAxisId="left" type="monotone" dataKey="planning_demand" stroke="#D9AA4B" strokeWidth={2.5} fill="url(#planGrad)" name="Planning Demand Index" />
+                  <Line yAxisId="left" type="monotone" dataKey="compliance_base" stroke="#6366f1" strokeWidth={2} strokeDasharray="5 5" name="Compliance Base Index" dot={false} />
+                  <Bar yAxisId="right" dataKey="planning_revenue" fill="rgba(34,197,94,0.5)" radius={[4, 4, 0, 0]} name="Planning Revenue ($M)" />
+                </ComposedChart>
+              </ResponsiveContainer>
+            </div>
+
+            <SectionHeader title="Provision-Level Action Plan" subtitle="Each expiring provision is a client conversation and a revenue opportunity. The CGO's job is to ensure every firm is having these conversations NOW." />
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {TCJA_PROVISIONS.map((p, i) => (
+                <div key={i} style={{
+                  background: "rgba(255,255,255,0.015)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 10,
+                  padding: "16px 24px", display: "grid", gridTemplateColumns: "2fr 80px 80px 2fr 120px", alignItems: "center", gap: 16,
+                  animation: `slideIn 0.4s ease ${i * 0.06}s both`,
+                }}>
+                  <div>
+                    <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: 14, fontWeight: 500, color: "#fff" }}>{p.provision}</div>
+                  </div>
+                  <div style={{
+                    fontFamily: "'JetBrains Mono', monospace", fontSize: 10, fontWeight: 600, textAlign: "center",
+                    color: p.impact === "CRITICAL" ? "#ef4444" : p.impact === "HIGH" ? "#eab308" : "#06b6d4",
+                    background: p.impact === "CRITICAL" ? "rgba(239,68,68,0.1)" : p.impact === "HIGH" ? "rgba(234,179,8,0.1)" : "rgba(6,182,212,0.1)",
+                    padding: "4px 8px", borderRadius: 4, letterSpacing: 0.5,
+                  }}>{p.impact}</div>
+                  <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12, color: "rgba(255,255,255,0.5)", textAlign: "center" }}>{p.clients_affected}</div>
+                  <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: 12, color: "rgba(255,255,255,0.5)" }}>{p.action}</div>
+                  <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12, fontWeight: 600, color: "#22c55e", textAlign: "right" }}>{p.revenue_per}</div>
+                </div>
+              ))}
+              <div style={{ display: "grid", gridTemplateColumns: "2fr 80px 80px 2fr 120px", padding: "0 24px", gap: 16 }}>
+                {["Provision", "Impact", "Clients", "CGO Action", "Rev/Client"].map((h, i) => (
+                  <div key={i} style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 9, color: "rgba(255,255,255,0.2)", letterSpacing: 1, textAlign: i >= 3 ? (i === 4 ? "right" : "left") : (i > 0 ? "center" : "left"), marginTop: -4 }}>{h}</div>
+                ))}
+              </div>
+            </div>
+
+            <div style={{ marginTop: 24, background: "rgba(239,68,68,0.04)", border: "1px solid rgba(239,68,68,0.12)", borderRadius: 12, padding: 24 }}>
+              <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: "#ef4444", letterSpacing: 1.5, marginBottom: 8 }}>CGO URGENCY SIGNAL</div>
+              <p style={{ fontFamily: "'DM Sans', sans-serif", fontSize: 14, color: "rgba(255,255,255,0.65)", lineHeight: 1.7, margin: 0 }}>
+                The TCJA sunset is a <strong style={{ color: "#fff" }}>once-in-a-decade forcing function</strong> for converting compliance clients into planning clients. Every firm on the platform has clients who will be affected. The CGO who launches a coordinated "TCJA Readiness Campaign" across all member firms in Q1 2026 — with templated client outreach, planning worksheets, and pricing guides — will generate millions in new advisory revenue while permanently shifting the client relationship from reactive to proactive. <strong style={{ color: "#fff" }}>This cannot wait.</strong>
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* CAS READINESS TAB */}
+        {activeTab === "cas" && (
+          <div>
+            <SectionHeader title="Client Advisory Services Readiness" subtitle="CAS revenue is projected to reach 30% of CPA firm revenue by 2026 (up from 18% in 2020). This scores each firm's readiness to deliver and scale CAS across the platform." />
+            
+            <div className="grid-3" style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16, marginBottom: 28 }}>
+              <div style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 12, padding: 20, textAlign: "center" }}>
+                <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: "rgba(255,255,255,0.35)", letterSpacing: 1 }}>PLATFORM CAS READINESS</div>
+                <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: 36, fontWeight: 700, color: getScoreColor(Math.round(CAS_FIRM_SCORES.reduce((s, f) => s + f.overall, 0) / firms.length)) }}>
+                  {Math.round(CAS_FIRM_SCORES.reduce((s, f) => s + f.overall, 0) / firms.length)}
+                </div>
+                <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: 11, color: "rgba(255,255,255,0.4)" }}>avg across {firms.length} firms</div>
+              </div>
+              <div style={{ background: "rgba(34,197,94,0.06)", border: "1px solid rgba(34,197,94,0.15)", borderRadius: 12, padding: 20, textAlign: "center" }}>
+                <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: "rgba(255,255,255,0.35)", letterSpacing: 1 }}>CAS-READY firms</div>
+                <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: 36, fontWeight: 700, color: "#22c55e" }}>
+                  {CAS_FIRM_SCORES.filter(f => f.overall >= 60).length}
+                </div>
+                <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: 11, color: "rgba(255,255,255,0.4)" }}>of {firms.length} scoring 60+</div>
+              </div>
+              <div style={{ background: "rgba(217,170,75,0.06)", border: "1px solid rgba(217,170,75,0.15)", borderRadius: 12, padding: 20, textAlign: "center" }}>
+                <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: "rgba(255,255,255,0.35)", letterSpacing: 1 }}>CAS REVENUE TARGET</div>
+                <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: 36, fontWeight: 700, color: "#D9AA4B" }}>30%</div>
+                <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: 11, color: "rgba(255,255,255,0.4)" }}>of total revenue by 2027</div>
+              </div>
+            </div>
+
+            {/* Maturity Model */}
+            <div style={{ background: "rgba(255,255,255,0.015)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 14, padding: 28, marginBottom: 24 }}>
+              <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: "rgba(255,255,255,0.35)", letterSpacing: 1.5, marginBottom: 16 }}>CAS MATURITY MODEL — WHERE EACH FIRM STANDS</div>
+              <div style={{ display: "flex", gap: 4, marginBottom: 20 }}>
+                {CAS_MATURITY.map((stage, i) => (
+                  <div key={i} style={{ flex: 1, position: "relative" }}>
+                    <div style={{ background: `${stage.color}15`, border: `1px solid ${stage.color}30`, borderRadius: 8, padding: "12px 10px", minHeight: 90 }}>
+                      <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 9, color: stage.color, letterSpacing: 1, marginBottom: 4 }}>{stage.stage}</div>
+                      <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: 12, fontWeight: 600, color: "#fff", marginBottom: 4 }}>{stage.label}</div>
+                      <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 9, color: "rgba(255,255,255,0.3)" }}>{stage.range} pts</div>
+                    </div>
+                    {/* Firm dots */}
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 8, justifyContent: "center" }}>
+                      {CAS_FIRM_SCORES.filter(f => {
+                        const [lo, hi] = stage.range.split("-").map(Number);
+                        return f.overall >= lo && f.overall <= hi;
+                      }).map((f, fi) => (
+                        <div key={fi} title={`${f.name}: ${f.overall}`} style={{
+                          width: 28, height: 28, borderRadius: "50%", background: `${stage.color}25`, border: `1px solid ${stage.color}50`,
+                          display: "flex", alignItems: "center", justifyContent: "center",
+                          fontFamily: "'JetBrains Mono', monospace", fontSize: 9, color: stage.color, fontWeight: 600,
+                        }}>
+                          {f.overall}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Firm Detail Grid */}
+            <SectionHeader title="Firm-Level CAS Scorecard" subtitle="Breakdown of CAS readiness across 8 capability dimensions for each member firm." />
+            <div style={{ overflowX: "auto" }}>
+              <div style={{ minWidth: 800 }}>
+                {/* Header Row */}
+                <div style={{ display: "grid", gridTemplateColumns: "140px repeat(8, 1fr) 70px", gap: 4, marginBottom: 4 }}>
+                  <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 9, color: "rgba(255,255,255,0.3)", padding: "8px 4px" }}>FIRM</div>
+                  {CAS_CRITERIA.map((c, i) => (
+                    <div key={i} style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 8, color: "rgba(255,255,255,0.3)", padding: "8px 2px", textAlign: "center", lineHeight: 1.3 }}>{c.label.toUpperCase()}</div>
+                  ))}
+                  <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 9, color: "rgba(255,255,255,0.3)", padding: "8px 4px", textAlign: "center" }}>OVERALL</div>
+                </div>
+                {/* Data Rows */}
+                {CAS_FIRM_SCORES.sort((a, b) => b.overall - a.overall).map((firm, i) => (
+                  <div key={i} style={{
+                    display: "grid", gridTemplateColumns: "140px repeat(8, 1fr) 70px", gap: 4,
+                    animation: `slideIn 0.3s ease ${i * 0.05}s both`,
+                    marginBottom: 4,
+                  }}>
+                    <div style={{
+                      fontFamily: "'DM Sans', sans-serif", fontSize: 12, fontWeight: 500, color: "rgba(255,255,255,0.7)",
+                      padding: "10px 8px", background: "rgba(255,255,255,0.02)", borderRadius: "6px 0 0 6px",
+                      display: "flex", alignItems: "center",
+                    }}>
+                      {firm.name.length > 16 ? firm.name.substring(0, 16) + "…" : firm.name}
+                    </div>
+                    {CAS_CRITERIA.map((c, ci) => {
+                      const score = firm.scores[c.id];
+                      return (
+                        <div key={ci} style={{
+                          background: `${getScoreColor(score)}08`,
+                          display: "flex", alignItems: "center", justifyContent: "center",
+                          fontFamily: "'JetBrains Mono', monospace", fontSize: 11, fontWeight: 500,
+                          color: getScoreColor(score), padding: "10px 4px",
+                        }}>
+                          {score}
+                        </div>
+                      );
+                    })}
+                    <div style={{
+                      background: getScoreBg(firm.overall), borderRadius: "0 6px 6px 0",
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                      fontFamily: "'JetBrains Mono', monospace", fontSize: 13, fontWeight: 700,
+                      color: getScoreColor(firm.overall),
+                    }}>
+                      {firm.overall}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div style={{ marginTop: 24, background: "rgba(217,170,75,0.04)", border: "1px solid rgba(217,170,75,0.12)", borderRadius: 12, padding: 24 }}>
+              <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: "#D9AA4B", letterSpacing: 1.5, marginBottom: 8 }}>CGO PLAYBOOK: COMPLIANCE → CAS CONVERSION</div>
+              <div className="grid-3" style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 20, marginTop: 12 }}>
+                {[
+                  { phase: "Quarter 1", title: "Foundation", color: "#06b6d4", items: "Audit tech stack across firms. Identify CAS champion partners. Begin subscription pricing pilots at 2-3 highest-readiness firms." },
+                  { phase: "Quarter 2", title: "Activation", color: "#D9AA4B", items: "Launch dedicated CAS teams. Roll out client segmentation model. Deploy standardized onboarding process. Begin TCJA planning as CAS entry point." },
+                  { phase: "Quarter 3-4", title: "Scale", color: "#22c55e", items: "Platform-wide CAS playbook rollout. AI-powered client dashboards. Target: every firm at Stage 3+ by year end. Measure CAS as % of total revenue monthly." },
+                ].map((p, i) => (
+                  <div key={i}>
+                    <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: p.color, letterSpacing: 1, marginBottom: 4 }}>{p.phase}</div>
+                    <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: 14, fontWeight: 600, color: "#fff", marginBottom: 8 }}>{p.title}</div>
+                    <p style={{ fontFamily: "'DM Sans', sans-serif", fontSize: 12.5, color: "rgba(255,255,255,0.55)", lineHeight: 1.6, margin: 0 }}>{p.items}</p>
                   </div>
                 ))}
               </div>
