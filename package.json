@@ -1,0 +1,21 @@
+{
+  "name": "growth-command-center",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Multi-Firm Growth Command Center - CGO Strategic Prototype by Binil Chacko",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "recharts": "^2.15.3"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.5.2",
+    "vite": "^6.3.5"
+  }
+}
